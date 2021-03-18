@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[7]:
+# In[1]:
 
 
 import nvidia.dali.ops as ops
@@ -24,7 +24,7 @@ import ast
 # # External Source Example
 # 
 
-# In[20]:
+# In[2]:
 
 
 class MultiClassIterator(object):
@@ -60,34 +60,53 @@ class MultiClassIterator(object):
         batch_crops = []
         batch_labels = [np.array(i) for i in range(4)] #Ignore this, just a dummy label being generated. 
         print('Counter Index Updated', self.counter_index)
-        if self.counter_index[self.largest_dataset_idx] == self.largest_dataset: 
-            #if we've gone through one iteration of the entire dataset, resets counters to 0. 
-            self.counter_index = {i: 0 for i, dataset in enumerate(self.datasets)}
-            
-        if self.counter_index[self.largest_dataset_idx] < self.largest_dataset:
-            #takes a row from our CSV file dataset, and appends the result values to a list. Value is yielded.
-                batch_counter = 0
-                cur_iterable = self.customroundrobin(self.iterable_datasets.__next__(), self.counter_index[self.counter_dataset])
-                while batch_counter < self.batch_size:
-                    self.counter_index[self.counter_dataset] += 1
-                    data_point = cur_iterable.__next__()
-                    crops = data_point["labels_crops"]
-                    crops = ast.literal_eval(crops)
-                    crops = [crops[0], crops[1], crops[2] - crops[0], crops[3] - crops[1]] #Format to support ops.slice
-                    batch_crops.append(np.array([crops], dtype=np.int32))
-                    batch_counter += 1
-                self.counter_dataset += 1
-                if self.counter_dataset == len(datasets):
-                    self.counter_dataset = 0
-                yield (batch_crops, batch_labels)
         
+        #takes a row from our CSV file dataset, and appends the result values to a list. Value is yielded.
+        batch_counter = 0
+        cur_iterable = self.customroundrobin(self.iterable_datasets.__next__(), self.counter_index[self.counter_dataset])
+        while batch_counter < self.batch_size:
+            self.counter_index[self.counter_dataset] += 1
+            data_point = cur_iterable.__next__()
+            crops = data_point["labels_crops"]
+            crops = ast.literal_eval(crops)
+            crops = [crops[0], crops[1], crops[2] - crops[0], crops[3] - crops[1]] #Format to support ops.slice
+            batch_crops.append(np.array([crops], dtype=np.int32))
+            batch_counter += 1
+        self.counter_dataset += 1
+        if self.counter_dataset == len(datasets):
+            self.counter_dataset = 0
+        yield (batch_crops, batch_labels)
+    
 
     @property
     def size(self):
         return self.largest_dataset
 
 
-# In[21]:
+# In[3]:
+
+
+class GenericIterator(DALIGenericIterator):
+    def __init__(self, **args):
+        super().__init__(**args)
+        pass
+    
+    def custom_collate(self, loader_dict):
+        #using this function for adding custom collate functionalit
+        pass
+
+    def __next__(self):
+        #Removed a few nuances, but we do require a custom DALIGenericIterator (for custom functions)
+        loader_dict = {}
+        out = super().__next__()
+        out = out[0]
+        loader_dict["input"] = out[self.output_map[0]].float()
+        loader_dict["labels"] = torch.squeeze(out[self.output_map[1]])
+
+        return loader_dict
+
+
+# In[4]:
 
 
 class ExternalSourcePipeline(Pipeline):
@@ -96,7 +115,6 @@ class ExternalSourcePipeline(Pipeline):
         self.input = ops.FileReader(file_list= file_list)
         self.label = ops.ExternalSource()
         self.crops = ops.ExternalSource()
-#         self.counter = ops.ExternalSource()
         self.decode = ops.ImageDecoder(device="mixed", output_type=types.RGB)
         self.res = ops.Resize(device="gpu", resize_x=224, resize_y=224)
         self.cast = ops.Cast(device="cpu", dtype=types.INT32)
@@ -107,7 +125,6 @@ class ExternalSourcePipeline(Pipeline):
         jpegs, dummy_labels = self.input()
         self.labels = self.label()
         self.crop_dim = self.crops()
-#         self.counter_idx = self.counter()
         anchor =  fn.reshape(fn.slice(self.crop_dim, 0, 2, axes=[1]), shape=[-1])
         shape = fn.reshape(fn.slice(self.crop_dim, 2, 2, axes = [1]), shape= [-1])
         anchor = self.cast(anchor)
@@ -115,7 +132,6 @@ class ExternalSourcePipeline(Pipeline):
         images = self.decode(jpegs)
         images = self.res(images)
 
-        #self.num_classes =  len(self.std_train_config["classes_train"][self.std_train_config["identifier"][self.identifier_index]])
 
 #       decode and slicing
         jpegs = fn.slice(jpegs, anchor, shape, axes= [0,1], device= 'gpu')
@@ -131,7 +147,7 @@ class ExternalSourcePipeline(Pipeline):
             self.feed_input(self.crop_dim, crops)
 
 
-# In[22]:
+# In[5]:
 
 
 datasets = [pd.read_csv(df, index_col= 'Unnamed: 0').to_dict(orient='records') for df in glob.glob('*.csv')]
@@ -140,17 +156,24 @@ datasets = [pd.read_csv(df, index_col= 'Unnamed: 0').to_dict(orient='records') f
 multi_iter = MultiClassIterator(datasets, 4)
 
 
-# In[23]:
+# In[6]:
 
 
 pipe = ExternalSourcePipeline(file_list = 'single_image.txt' ,batch_size= 4, num_threads=2, device_id=0,
                                   external_data=multi_iter)
 
 
-# In[24]:
+# In[8]:
 
 
-pii = DALIGenericIterator(pipe, output_map=['data', 'label', 'crops'], auto_reset = True, size = multi_iter.size)
+pii = GenericIterator(pipelines = pipe, output_map=['data', 'label', 'crops'], auto_reset = True, size = multi_iter.size)
+
+
+# In[9]:
+
+
+for x in pii:
+    print(x['labels'])
 
 
 # In[ ]:
